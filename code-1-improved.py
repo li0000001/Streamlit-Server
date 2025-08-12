@@ -233,10 +233,10 @@ def generate_all_configs(domain, uuid_str, port_vm_ws, hysteria_port, hysteria_a
     # 生成hysteria客户端配置
     hysteria_client_config = {
         "server": f"{domain}:{hysteria_port}",
-        "auth_str": hysteria_auth,
+        "auth": hysteria_auth,
         "bandwidth": {
-            "up": "50 mbps",
-            "down": "100 mbps"
+            "up": "50",
+            "down": "100"
         },
         "socks5": {
             "listen": "127.0.0.1:10808"
@@ -326,21 +326,53 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token, hysteria_por
                 
                 os.chmod(singbox_path, 0o755)
 
-            # 下载hysteria
+            # 下载hysteria (修复下载链接)
             hysteria_path = INSTALL_DIR / ("hysteria.exe" if system == "windows" else "hysteria")
             if not hysteria_path.exists():
-                hy_version = "v2.5.2"
+                hy_version = "v2.6.0"  # 更新到最新版本
+                # 修正下载链接格式
                 if system == "linux":
-                    url = f"https://github.com/apernet/hysteria/releases/download/{hy_version}/hysteria-linux-{arch}"
+                    if arch == "amd64":
+                        url = f"https://github.com/apernet/hysteria/releases/download/{hy_version}/hysteria-linux-amd64"
+                    elif arch == "arm64":
+                        url = f"https://github.com/apernet/hysteria/releases/download/{hy_version}/hysteria-linux-arm64"
+                    else:
+                        url = f"https://github.com/apernet/hysteria/releases/download/{hy_version}/hysteria-linux-arm"  # 默认arm
                 elif system == "windows":
-                    url = f"https://github.com/apernet/hysteria/releases/download/{hy_version}/hysteria-windows-{arch}.exe"
+                    if arch == "amd64":
+                        url = f"https://github.com/apernet/hysteria/releases/download/{hy_version}/hysteria-windows-amd64.exe"
+                    else:
+                        url = f"https://github.com/apernet/hysteria/releases/download/{hy_version}/hysteria-windows-arm64.exe"
                 else:
                     return False, f"不支持的操作系统: {system}"
-                    
+                
+                st.info(f"正在下载 Hysteria: {url}")
                 if not download_file(url, hysteria_path):
-                    return False, "hysteria 下载失败。"
-                    
+                    # 如果直接下载失败，尝试另一种方式
+                    try:
+                        # 尝试不带v前缀的版本号
+                        hy_version_alt = hy_version[1:]  # 移除v前缀
+                        if system == "linux":
+                            if arch == "amd64":
+                                url_alt = f"https://github.com/apernet/hysteria/releases/download/v{hy_version_alt}/hysteria-linux-amd64"
+                            elif arch == "arm64":
+                                url_alt = f"https://github.com/apernet/hysteria/releases/download/v{hy_version_alt}/hysteria-linux-arm64"
+                            else:
+                                url_alt = f"https://github.com/apernet/hysteria/releases/download/v{hy_version_alt}/hysteria-linux-arm"
+                        elif system == "windows":
+                            if arch == "amd64":
+                                url_alt = f"https://github.com/apernet/hysteria/releases/download/v{hy_version_alt}/hysteria-windows-amd64.exe"
+                            else:
+                                url_alt = f"https://github.com/apernet/hysteria/releases/download/v{hy_version_alt}/hysteria-windows-arm64.exe"
+                        
+                        st.info(f"尝试备用下载链接: {url_alt}")
+                        if not download_file(url_alt, hysteria_path):
+                            return False, f"hysteria 下载失败。主链接: {url}, 备用链接: {url_alt}"
+                    except:
+                        return False, f"hysteria 下载失败: {url}"
+                
                 os.chmod(hysteria_path, 0o755)
+                st.success("Hysteria 下载完成!")
 
             # 下载cloudflared
             cloudflared_path = INSTALL_DIR / ("cloudflared.exe" if system == "windows" else "cloudflared")
@@ -396,6 +428,15 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token, hysteria_por
                         "url": f"http://127.0.0.1:{port_vm_ws}",
                         "rewriteHost": True
                     }
+                },
+                "quic": {
+                    "initStreamReceiveWindow": 8388608,
+                    "maxStreamReceiveWindow": 8388608,
+                    "initConnReceiveWindow": 20971520,
+                    "maxConnReceiveWindow": 20971520,
+                    "maxIdleTimeout": "30s",
+                    "maxIncomingStreams": 1024,
+                    "disablePathMTUDiscovery": False
                 }
             }
             
