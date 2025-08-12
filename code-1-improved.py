@@ -13,21 +13,9 @@ import socket
 import subprocess
 import platform
 import uuid
-import logging
 from pathlib import Path
 import urllib.request
 import streamlit as st
-
-# --- 日志配置 ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(message)s',
-    handlers=[
-        logging.FileHandler(Path.home() / ".agsb" / "app.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
 
 # --- 全局常量定义 ---
 # 工作目录，用于存放运行时产生的文件
@@ -49,11 +37,9 @@ def download_file(url, target_path):
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as response, open(target_path, 'wb') as out_file:
             shutil.copyfileobj(response, out_file)
-        logger.info(f"文件下载成功: {url}")
         return True
     except Exception as e:
         st.error(f"下载失败: {url}, 错误: {e}")
-        logger.error(f"文件下载失败: {url}, 错误: {e}")
         return False
 
 def generate_vmess_link(config):
@@ -73,19 +59,13 @@ def get_tunnel_domain():
             try:
                 log_content = LOG_FILE.read_text(encoding='utf-8')
                 match = re.search(r'https://([a-zA-Z0-9.-]+\.trycloudflare\.com)', log_content)
-                if match: 
-                    domain = match.group(1)
-                    logger.info(f"获取到隧道域名: {domain}")
-                    return domain
-            except Exception as e:
-                logger.error(f"解析日志文件时出错: {e}")
+                if match: return match.group(1)
+            except Exception: pass
         time.sleep(2)
     return None
 
 def stop_services():
     """停止所有相关服务进程。"""
-    logger.info("正在停止所有相关服务进程...")
-    
     # 根据操作系统选择不同的终止进程方法
     system = platform.system()
     
@@ -97,13 +77,8 @@ def stop_services():
                     subprocess.run(f"taskkill /F /PID {pid}", shell=True, capture_output=True)
                 else:
                     os.kill(pid, 9)
-                logger.info(f"已终止进程 PID: {pid}")
-            except (ValueError, ProcessLookupError, FileNotFoundError) as e:
-                logger.warning(f"终止进程时出错: {e}")
-            except Exception as e:
-                logger.error(f"未知错误: {e}")
-            finally:
-                pid_file.unlink(missing_ok=True)
+            except (ValueError, ProcessLookupError, FileNotFoundError): pass
+            finally: pid_file.unlink(missing_ok=True)
     
     # 终止相关进程
     try:
@@ -113,15 +88,12 @@ def stop_services():
         else:
             subprocess.run("pkill -9 -f 'sing-box run'", shell=True, capture_output=True)
             subprocess.run("pkill -9 -f 'cloudflared tunnel'", shell=True, capture_output=True)
-        logger.info("已终止相关进程")
-    except Exception as e:
-        logger.error(f"终止进程时出错: {e}")
+    except Exception: pass
 
 # --- 核心逻辑 ---
 
 def generate_all_configs(domain, uuid_str, port_vm_ws):
     """生成所有节点链接和客户端配置文件，并返回用于UI显示的文本。"""
-    logger.info("正在生成所有配置...")
     hostname = socket.gethostname()[:10]
     all_links = []
     
@@ -231,12 +203,10 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
     
     try:
         INSTALL_DIR.mkdir(parents=True, exist_ok=True)
-        logger.info(f"工作目录已创建: {INSTALL_DIR}")
         
         # 补全可能为空的配置
         uuid_str = uuid_str or str(uuid.uuid4())
         port_vm_ws = port_vm_ws or random.randint(10000, 65535)
-        logger.info(f"使用UUID: {uuid_str}, 端口: {port_vm_ws}")
 
         with st.spinner("正在检查并安装依赖 (sing-box, cloudflared)..."):
             arch = platform.machine().lower()
@@ -249,8 +219,6 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
                 arch = "arm64" if "64" in arch else "arm"
             else:
                 arch = "amd64"  # 默认
-                
-            logger.info(f"检测到系统架构: {system}-{arch}")
 
             # 下载sing-box
             singbox_path = INSTALL_DIR / ("sing-box.exe" if system == "windows" else "sing-box")
@@ -290,7 +258,6 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
                     return False, f"不支持的操作系统: {system}"
                 
                 os.chmod(singbox_path, 0o755)
-                logger.info("sing-box 安装完成")
 
             # 下载cloudflared
             cloudflared_path = INSTALL_DIR / ("cloudflared.exe" if system == "windows" else "cloudflared")
@@ -307,7 +274,6 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
                     return False, "cloudflared 下载失败。"
                     
                 os.chmod(cloudflared_path, 0o755)
-                logger.info("cloudflared 安装完成")
 
         with st.spinner("正在根据您的配置启动服务..."):
             # 创建sing-box配置
@@ -339,7 +305,6 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
                     stderr=subprocess.STDOUT
                 )
             SB_PID_FILE.write_text(str(sb_process.pid))
-            logger.info(f"sing-box 已启动, PID: {sb_process.pid}")
             
             # 启动cloudflared
             if argo_token:
@@ -355,7 +320,6 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
                     stderr=subprocess.STDOUT
                 )
             ARGO_PID_FILE.write_text(str(cf_process.pid))
-            logger.info(f"cloudflared 已启动, PID: {cf_process.pid}")
 
         with st.spinner("正在获取隧道域名并生成节点信息..."):
             time.sleep(5)
@@ -364,11 +328,9 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
                 return False, "未能确定隧道域名。请检查日志 (`.agsb/argo.log`)。"
 
         links_output = generate_all_configs(final_domain, uuid_str, port_vm_ws)
-        logger.info("服务启动完成")
         return True, links_output
     
     except Exception as e:
-        logger.error(f"处理过程中发生意外错误: {e}", exc_info=True)
         return False, f"处理过程中发生意外错误: {e}"
 
 def uninstall_services():
@@ -379,13 +341,11 @@ def uninstall_services():
     if INSTALL_DIR.exists():
         try:
             shutil.rmtree(INSTALL_DIR)
-            logger.info("已删除工作目录")
         except Exception as e:
-            logger.error(f"删除工作目录时出错: {e}")
+            st.error(f"删除工作目录时出错: {e}")
             
     st.success("✅ 卸载完成。所有运行时文件和进程已清除。")
     st.session_state.clear()
-    logger.info("卸载完成")
 
 # --- UI 渲染函数 ---
 
