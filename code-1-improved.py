@@ -22,10 +22,12 @@ import streamlit as st
 INSTALL_DIR = Path.home() / ".agsb"
 # 运行时生成的各种文件路径
 SB_PID_FILE = INSTALL_DIR / "sbpid.log"
+HYSTERIA_PID_FILE = INSTALL_DIR / "hysteria_pid.log"
 ARGO_PID_FILE = INSTALL_DIR / "sbargopid.log"
 LIST_FILE = INSTALL_DIR / "list.txt"
 LOG_FILE = INSTALL_DIR / "argo.log"
 SB_LOG_FILE = INSTALL_DIR / "sb.log"
+HYSTERIA_LOG_FILE = INSTALL_DIR / "hysteria.log"
 SINGBOX_CONFIG_FILE = INSTALL_DIR / "singbox_client_config.json"
 ALL_NODES_FILE = INSTALL_DIR / "allnodes.txt"
 
@@ -52,6 +54,13 @@ def generate_vmess_link(config):
     vmess_str = json.dumps(vmess_obj, separators=(',', ':'))
     return f"vmess://{base64.b64encode(vmess_str.encode('utf-8')).decode('utf-8').rstrip('=')}"
 
+def generate_hysteria_link(domain, port, auth_str, peer, insecure=1):
+    """生成Hysteria链接。"""
+    # hysteria://domain:port?protocol=udp&auth=auth_str&peer=peer&insecure=1#remark
+    remark = f"HY-{domain}"
+    link = f"hysteria://{domain}:{port}?protocol=udp&auth={auth_str}&peer={peer}&insecure={insecure}#{remark}"
+    return link
+
 def get_tunnel_domain():
     """从argo日志中获取临时隧道域名。"""
     for _ in range(15):
@@ -69,7 +78,7 @@ def stop_services():
     # 根据操作系统选择不同的终止进程方法
     system = platform.system()
     
-    for pid_file in [SB_PID_FILE, ARGO_PID_FILE]:
+    for pid_file in [SB_PID_FILE, HYSTERIA_PID_FILE, ARGO_PID_FILE]:
         if pid_file.exists():
             try:
                 pid = int(pid_file.read_text().strip())
@@ -84,20 +93,22 @@ def stop_services():
     try:
         if system == "Windows":
             subprocess.run("taskkill /F /IM sing-box.exe", shell=True, capture_output=True)
+            subprocess.run("taskkill /F /IM hysteria.exe", shell=True, capture_output=True)
             subprocess.run("taskkill /F /IM cloudflared.exe", shell=True, capture_output=True)
         else:
             subprocess.run("pkill -9 -f 'sing-box run'", shell=True, capture_output=True)
+            subprocess.run("pkill -9 -f 'hysteria server'", shell=True, capture_output=True)
             subprocess.run("pkill -9 -f 'cloudflared tunnel'", shell=True, capture_output=True)
     except Exception: pass
 
 # --- 核心逻辑 ---
 
-def generate_all_configs(domain, uuid_str, port_vm_ws):
+def generate_all_configs(domain, uuid_str, port_vm_ws, hysteria_port, hysteria_auth):
     """生成所有节点链接和客户端配置文件，并返回用于UI显示的文本。"""
     hostname = socket.gethostname()[:10]
     all_links = []
     
-    # Cloudflare IP列表 (可配置)
+    # 生成Vmess链接
     cf_ips_tls = {
         "104.16.0.0": "443", 
         "104.17.0.0": "8443", 
@@ -125,17 +136,28 @@ def generate_all_configs(domain, uuid_str, port_vm_ws):
         "sni": domain
     }))
     
+    # 生成Hysteria链接
+    all_links.append(generate_hysteria_link(
+        domain=domain,
+        port=hysteria_port,
+        auth_str=hysteria_auth,
+        peer=domain,
+        insecure=1
+    ))
+    
     ALL_NODES_FILE.write_text("\n".join(all_links) + "\n", encoding='utf-8')
 
     list_output_text = f"""
 ✅ **服务已启动**
 ---
 - **域名 (Domain):** `{domain}`
-- **UUID:** `{uuid_str}`
-- **本地端口:** `{port_vm_ws}`
+- **Vmess UUID:** `{uuid_str}`
+- **Vmess 本地端口:** `{port_vm_ws}`
+- **Hysteria 端口:** `{hysteria_port}`
+- **Hysteria 密码:** `{hysteria_auth}`
 - **WebSocket路径:** `/`
 ---
-**Vmess 链接 (可复制):**
+**节点链接 (可复制):**
 """ + "\n".join(all_links)
     
     LIST_FILE.write_text(list_output_text, encoding='utf-8')
@@ -155,7 +177,7 @@ def generate_all_configs(domain, uuid_str, port_vm_ws):
         "outbounds": [
             {
                 "type": "vmess",
-                "tag": "proxy",
+                "tag": "proxy-vmess",
                 "server": domain,
                 "server_port": 443,
                 "uuid": uuid_str,
@@ -177,6 +199,20 @@ def generate_all_configs(domain, uuid_str, port_vm_ws):
                 }
             },
             {
+                "type": "hysteria",
+                "tag": "proxy-hysteria",
+                "server": domain,
+                "server_port": int(hysteria_port),
+                "up_mbps": 100,
+                "down_mbps": 100,
+                "auth_str": hysteria_auth,
+                "tls": {
+                    "enabled": True,
+                    "server_name": domain,
+                    "insecure": True
+                }
+            },
+            {
                 "type": "direct",
                 "tag": "direct"
             }
@@ -188,15 +224,40 @@ def generate_all_configs(domain, uuid_str, port_vm_ws):
                     "outbound": "direct"
                 }
             ],
-            "final": "proxy"
+            "final": "proxy-vmess"
         }
     }
     
     SINGBOX_CONFIG_FILE.write_text(json.dumps(singbox_config, indent=2, ensure_ascii=False), encoding='utf-8')
     
+    # 生成hysteria客户端配置
+    hysteria_client_config = {
+        "server": f"{domain}:{hysteria_port}",
+        "auth_str": hysteria_auth,
+        "bandwidth": {
+            "up": "50 mbps",
+            "down": "100 mbps"
+        },
+        "socks5": {
+            "listen": "127.0.0.1:10808"
+        },
+        "http": {
+            "listen": "127.0.0.1:10809"
+        },
+        "tls": {
+            "sni": domain,
+            "insecure": True
+        }
+    }
+    
+    (INSTALL_DIR / "hysteria_client.json").write_text(
+        json.dumps(hysteria_client_config, indent=2, ensure_ascii=False), 
+        encoding='utf-8'
+    )
+    
     return list_output_text
 
-def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
+def start_services(uuid_str, port_vm_ws, custom_domain, argo_token, hysteria_port, hysteria_auth):
     """核心函数：根据Secrets中的配置，安装并启动服务。"""
     with st.spinner("正在停止任何可能残留的旧服务..."):
         stop_services()
@@ -207,8 +268,14 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
         # 补全可能为空的配置
         uuid_str = uuid_str or str(uuid.uuid4())
         port_vm_ws = port_vm_ws or random.randint(10000, 65535)
+        hysteria_port = hysteria_port or random.randint(10000, 65535)
+        hysteria_auth = hysteria_auth or str(uuid.uuid4())
+        
+        # 确保端口不冲突
+        if port_vm_ws == hysteria_port:
+            hysteria_port = random.randint(10000, 65535)
 
-        with st.spinner("正在检查并安装依赖 (sing-box, cloudflared)..."):
+        with st.spinner("正在检查并安装依赖 (sing-box, hysteria, cloudflared)..."):
             arch = platform.machine().lower()
             system = platform.system().lower()
             
@@ -259,6 +326,22 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
                 
                 os.chmod(singbox_path, 0o755)
 
+            # 下载hysteria
+            hysteria_path = INSTALL_DIR / ("hysteria.exe" if system == "windows" else "hysteria")
+            if not hysteria_path.exists():
+                hy_version = "v2.5.2"
+                if system == "linux":
+                    url = f"https://github.com/apernet/hysteria/releases/download/{hy_version}/hysteria-linux-{arch}"
+                elif system == "windows":
+                    url = f"https://github.com/apernet/hysteria/releases/download/{hy_version}/hysteria-windows-{arch}.exe"
+                else:
+                    return False, f"不支持的操作系统: {system}"
+                    
+                if not download_file(url, hysteria_path):
+                    return False, "hysteria 下载失败。"
+                    
+                os.chmod(hysteria_path, 0o755)
+
             # 下载cloudflared
             cloudflared_path = INSTALL_DIR / ("cloudflared.exe" if system == "windows" else "cloudflared")
             if not cloudflared_path.exists():
@@ -296,6 +379,41 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
             sb_config_path = INSTALL_DIR / "sb.json"
             sb_config_path.write_text(json.dumps(sb_config, indent=2), encoding='utf-8')
             
+            # 创建hysteria配置
+            hysteria_config = {
+                "listen": f":{hysteria_port}",
+                "tls": {
+                    "cert": str(INSTALL_DIR / "tls.crt"),
+                    "key": str(INSTALL_DIR / "tls.key")
+                },
+                "auth": {
+                    "type": "password",
+                    "password": hysteria_auth
+                },
+                "masquerade": {
+                    "type": "proxy",
+                    "proxy": {
+                        "url": f"http://127.0.0.1:{port_vm_ws}",
+                        "rewriteHost": True
+                    }
+                }
+            }
+            
+            # 生成自签名证书（简化处理，实际使用中建议使用有效证书）
+            cert_path = INSTALL_DIR / "tls.crt"
+            key_path = INSTALL_DIR / "tls.key"
+            if not cert_path.exists() or not key_path.exists():
+                # 使用sing-box生成自签名证书
+                subprocess.run([
+                    str(singbox_path), "tls", "generate-cert",
+                    "--domain", "localhost",
+                    "--cert", str(cert_path),
+                    "--key", str(key_path)
+                ], cwd=INSTALL_DIR, capture_output=True)
+            
+            hysteria_config_path = INSTALL_DIR / "hysteria_server.json"
+            hysteria_config_path.write_text(json.dumps(hysteria_config, indent=2), encoding='utf-8')
+            
             # 启动sing-box
             with open(SB_LOG_FILE, "w", encoding='utf-8') as sb_log:
                 sb_process = subprocess.Popen(
@@ -305,6 +423,16 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
                     stderr=subprocess.STDOUT
                 )
             SB_PID_FILE.write_text(str(sb_process.pid))
+            
+            # 启动hysteria
+            with open(HYSTERIA_LOG_FILE, "w", encoding='utf-8') as hy_log:
+                hy_process = subprocess.Popen(
+                    [str(hysteria_path), 'server', '-c', 'hysteria_server.json'], 
+                    cwd=INSTALL_DIR, 
+                    stdout=hy_log, 
+                    stderr=subprocess.STDOUT
+                )
+            HYSTERIA_PID_FILE.write_text(str(hy_process.pid))
             
             # 启动cloudflared
             if argo_token:
@@ -327,7 +455,7 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
             if not final_domain:
                 return False, "未能确定隧道域名。请检查日志 (`.agsb/argo.log`)。"
 
-        links_output = generate_all_configs(final_domain, uuid_str, port_vm_ws)
+        links_output = generate_all_configs(final_domain, uuid_str, port_vm_ws, hysteria_port, hysteria_auth)
         return True, links_output
     
     except Exception as e:
@@ -359,7 +487,9 @@ def render_main_ui(config):
     
     st.json({
         "UUID": config["uuid_str"] or "将自动生成",
-        "本地端口": config["port_vm_ws"] or "将随机选择",
+        "Vmess端口": config["port_vm_ws"] or "将随机选择",
+        "Hysteria端口": config["hysteria_port"] or "将随机选择",
+        "Hysteria密码": config["hysteria_auth"] or "将自动生成",
         "自定义域名": config["custom_domain"] or "将使用Cloudflare临时域名",
         "Argo Token": "********" if config["argo_token"] else "未提供"
     })
@@ -370,7 +500,14 @@ def render_main_ui(config):
     c1, c2 = st.columns(2)
     if c1.button("🚀 启动/重启服务", type="primary", use_container_width=True):
         with st.spinner("正在启动服务..."):
-            success, message = start_services(config["uuid_str"], config["port_vm_ws"], config["custom_domain"], config["argo_token"])
+            success, message = start_services(
+                config["uuid_str"], 
+                config["port_vm_ws"], 
+                config["custom_domain"], 
+                config["argo_token"],
+                config["hysteria_port"],
+                config["hysteria_auth"]
+            )
         if success:
             st.session_state.output = message
             st.success("服务启动成功!")
@@ -407,6 +544,16 @@ def render_main_ui(config):
                 file_name="singbox_client_config.json",
                 mime="application/json"
             )
+        
+        hysteria_client_file = INSTALL_DIR / "hysteria_client.json"
+        if hysteria_client_file.exists():
+            hy_config_content = hysteria_client_file.read_text(encoding='utf-8')
+            st.download_button(
+                label="📥 下载Hysteria客户端配置",
+                data=hy_config_content,
+                file_name="hysteria_client.json",
+                mime="application/json"
+            )
 
 def render_login_ui(secret_key):
     """渲染伪装的登录界面。"""
@@ -433,6 +580,8 @@ def main():
         config = {
             "uuid_str": st.secrets.get("UUID_STR", ""),
             "port_vm_ws": st.secrets.get("PORT_VM_WS", 0),
+            "hysteria_port": st.secrets.get("HYSTERIA_PORT", 0),
+            "hysteria_auth": st.secrets.get("HYSTERIA_AUTH", ""),
             "custom_domain": st.secrets.get("CUSTOM_DOMAIN", ""),
             "argo_token": st.secrets.get("ARGO_TOKEN", "")
         }
