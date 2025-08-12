@@ -56,9 +56,9 @@ def generate_vmess_link(config):
 
 def generate_hysteria_link(domain, port, auth_str, peer, insecure=1):
     """生成Hysteria链接。"""
-    # hysteria://domain:port?protocol=udp&auth=auth_str&peer=peer&insecure=1#remark
-    remark = f"HY-{domain}"
-    link = f"hysteria://{domain}:{port}?protocol=udp&auth={auth_str}&peer={peer}&insecure={insecure}#{remark}"
+    # hysteria2://auth@server:port?security=tls&alpn=h3&insecure=1&sni=domain#remark
+    remark = f"HY2-{domain}"
+    link = f"hysteria2://{auth_str}@{domain}:{port}?security=tls&alpn=h3&insecure={insecure}&sni={peer}#{remark}"
     return link
 
 def get_tunnel_domain():
@@ -136,12 +136,12 @@ def generate_all_configs(domain, uuid_str, port_vm_ws, hysteria_port, hysteria_a
         "sni": domain
     }))
     
-    # 生成Hysteria链接 (使用443端口)
+    # 生成Hysteria2链接 (使用参考脚本的格式)
     all_links.append(generate_hysteria_link(
         domain=domain,
         port=443,
         auth_str=hysteria_auth,
-        peer=domain,
+        peer="www.bing.com",  # 使用常见的域名
         insecure=1
     ))
     
@@ -199,16 +199,14 @@ def generate_all_configs(domain, uuid_str, port_vm_ws, hysteria_port, hysteria_a
                 }
             },
             {
-                "type": "hysteria",
-                "tag": "proxy-hysteria",
+                "type": "hysteria2",
+                "tag": "proxy-hysteria2",
                 "server": domain,
                 "server_port": 443,
-                "up_mbps": 100,
-                "down_mbps": 100,
-                "auth_str": hysteria_auth,
+                "password": hysteria_auth,
                 "tls": {
                     "enabled": True,
-                    "server_name": domain,
+                    "server_name": "www.bing.com",
                     "insecure": True
                 }
             },
@@ -230,28 +228,22 @@ def generate_all_configs(domain, uuid_str, port_vm_ws, hysteria_port, hysteria_a
     
     SINGBOX_CONFIG_FILE.write_text(json.dumps(singbox_config, indent=2, ensure_ascii=False), encoding='utf-8')
     
-    # 生成hysteria客户端配置 (使用443端口并改进TLS配置)
+    # 生成hysteria2客户端配置 (使用参考脚本的配置)
     hysteria_client_config = {
         "server": f"{domain}:443",
         "auth": hysteria_auth,
-        "bandwidth": {
-            "up": "50 mbps",
-            "down": "100 mbps"
+        "tls": {
+            "sni": "www.bing.com",
+            "insecure": True
         },
         "socks5": {
-            "listen": "127.0.0.1:10808"
+            "listen": "127.0.0.1:10810"  # 更改端口避免冲突
         },
         "http": {
-            "listen": "127.0.0.1:10809"
-        },
-        "tls": {
-            "sni": domain,
-            "insecure": True,
-            "pinSHA256": ""
+            "listen": "127.0.0.1:10811"  # 更改端口避免冲突
         },
         "fast_open": True,
-        "lazy": True,
-        "hop_interval": "60s"
+        "lazy": True
     }
     
     (INSTALL_DIR / "hysteria_client.json").write_text(
@@ -370,14 +362,18 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token, hysteria_por
                 os.chmod(cloudflared_path, 0o755)
 
         with st.spinner("正在根据您的配置启动服务..."):
-            # 创建sing-box配置
+            # 创建sing-box配置 (使用参考脚本的配置)
             sb_config = {
-                "log": {"level": "info"},
+                "log": {
+                    "disabled": False,
+                    "level": "info",
+                    "timestamp": True
+                },
                 "inbounds": [
                     {
                         "type": "vmess",
                         "tag": "vmess-in",
-                        "listen": "127.0.0.1",
+                        "listen": "::",  # 使用IPv6兼容监听
                         "listen_port": port_vm_ws,
                         "sniff": True,
                         "users": [{"uuid": uuid_str, "alterId": 0}],
@@ -390,51 +386,34 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token, hysteria_por
             sb_config_path = INSTALL_DIR / "sb.json"
             sb_config_path.write_text(json.dumps(sb_config, indent=2), encoding='utf-8')
             
-            # 创建hysteria配置 (改进TLS和端口配置)
-            hysteria_config = {
-                "listen": ":443",
-                "tls": {
-                    "cert": str(INSTALL_DIR / "tls.crt"),
-                    "key": str(INSTALL_DIR / "tls.key")
-                },
-                "auth": {
-                    "type": "password",
-                    "password": hysteria_auth
-                },
-                "masquerade": {
-                    "type": "proxy",
-                    "proxy": {
-                        "url": f"http://127.0.0.1:{port_vm_ws}",
-                        "rewriteHost": True
-                    }
-                },
-                "quic": {
-                    "initStreamReceiveWindow": 8388608,
-                    "maxStreamReceiveWindow": 8388608,
-                    "initConnReceiveWindow": 20971520,
-                    "maxConnReceiveWindow": 20971520,
-                    "maxIdleTimeout": "30s",
-                    "maxIncomingStreams": 1024,
-                    "disablePathMTUDiscovery": False
-                },
-                "bandwidth": {
-                    "up": "100 mbps",
-                    "down": "100 mbps"
-                },
-                "ignoreClientBandwidth": False
-            }
-            
-            # 生成自签名证书（简化处理，实际使用中建议使用有效证书）
-            cert_path = INSTALL_DIR / "tls.crt"
-            key_path = INSTALL_DIR / "tls.key"
+            # 生成TLS证书 (使用参考脚本的方法)
+            cert_path = INSTALL_DIR / "cert.pem"
+            key_path = INSTALL_DIR / "private.key"
             if not cert_path.exists() or not key_path.exists():
                 # 使用sing-box生成自签名证书
                 subprocess.run([
                     str(singbox_path), "tls", "generate-cert",
-                    "--domain", "localhost",
+                    "--domain", "www.bing.com",  # 使用常见域名
                     "--cert", str(cert_path),
                     "--key", str(key_path)
                 ], cwd=INSTALL_DIR, capture_output=True)
+            
+            # 创建hysteria配置 (使用参考脚本的配置)
+            hysteria_config = {
+                "listen": ":443",
+                "tls": {
+                    "enabled": True,
+                    "alpn": ["h3"],
+                    "certificate_path": str(cert_path),
+                    "key_path": str(key_path)
+                },
+                "users": [
+                    {
+                        "password": hysteria_auth
+                    }
+                ],
+                "ignore_client_bandwidth": False
+            }
             
             hysteria_config_path = INSTALL_DIR / "hysteria_server.json"
             hysteria_config_path.write_text(json.dumps(hysteria_config, indent=2), encoding='utf-8')
@@ -459,12 +438,12 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token, hysteria_por
                 )
             HYSTERIA_PID_FILE.write_text(str(hy_process.pid))
             
-            # 启动cloudflared (修改为同时暴露两个端口)
+            # 启动cloudflared
             if argo_token:
                 cf_cmd = [str(cloudflared_path), 'tunnel', '--no-autoupdate', 'run', '--token', argo_token]
             else:
-                # 使用443端口
-                cf_cmd = [str(cloudflared_path), 'tunnel', '--no-autoupdate', '--url', f'http://localhost:{port_vm_ws}', '--protocol', 'http2']
+                # 使用443端口并指定协议
+                cf_cmd = [str(cloudflared_path), 'tunnel', '--url', f'http://localhost:{port_vm_ws}', '--edge-ip-version', 'auto', '--no-autoupdate', '--protocol', 'http2']
                 
             with open(LOG_FILE, "w", encoding='utf-8') as cf_log:
                 cf_process = subprocess.Popen(
