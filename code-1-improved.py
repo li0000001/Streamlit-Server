@@ -230,13 +230,13 @@ def generate_all_configs(domain, uuid_str, port_vm_ws, hysteria_port, hysteria_a
     
     SINGBOX_CONFIG_FILE.write_text(json.dumps(singbox_config, indent=2, ensure_ascii=False), encoding='utf-8')
     
-    # 生成hysteria客户端配置
+    # 生成hysteria客户端配置 (修复格式问题)
     hysteria_client_config = {
         "server": f"{domain}:{hysteria_port}",
         "auth": hysteria_auth,
         "bandwidth": {
-            "up": "50",
-            "down": "100"
+            "up": "50 mbps",
+            "down": "100 mbps"
         },
         "socks5": {
             "listen": "127.0.0.1:10808"
