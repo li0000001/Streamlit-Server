@@ -89,6 +89,36 @@ def stop_services():
     subprocess.run("pkill -9 -f 'sing-box run'", shell=True, capture_output=True)
     subprocess.run("pkill -9 -f 'cloudflared tunnel'", shell=True, capture_output=True)
 
+# 生成随机密钥和ID的函数
+def generate_reality_keys(singbox_path):
+    """生成Reality所需的密钥和shortId"""
+    try:
+        # 生成私钥和公钥
+        keypair_output = subprocess.run(
+            [str(singbox_path), "generate", "reality-keypair"],
+            cwd=INSTALL_DIR, capture_output=True, text=True, timeout=30
+        )
+        if keypair_output.returncode != 0:
+            raise Exception(f"生成密钥对失败: {keypair_output.stderr}")
+        
+        private_key, public_key = keypair_output.stdout.strip().split('\t')
+        
+        # 生成shortId
+        short_id_output = subprocess.run(
+            [str(singbox_path), "generate", "rand", "--hex", "8"],
+            cwd=INSTALL_DIR, capture_output=True, text=True, timeout=30
+        )
+        if short_id_output.returncode != 0:
+            raise Exception(f"生成shortId失败: {short_id_output.stderr}")
+        
+        short_id = short_id_output.stdout.strip()
+        
+        return private_key, public_key, short_id
+    except subprocess.TimeoutExpired:
+        raise Exception("生成密钥超时")
+    except Exception as e:
+        raise Exception(f"生成密钥过程中出错: {e}")
+
 # --- 核心逻辑重构 ---
 
 def generate_all_configs(domain, uuid_str, public_key, private_key, short_id):
@@ -214,37 +244,49 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
         # 补全可能为空的配置
         uuid_str = uuid_str or str(uuid.uuid4())
         port_vm_ws = port_vm_ws or random.randint(10000, 65535)
-        
-        # 生成Reality所需的密钥和shortId
-        private_key = subprocess.run(["./sing-box", "generate", "reality-key"], 
-                                   cwd=INSTALL_DIR, capture_output=True, text=True).stdout.strip()
-        public_key = subprocess.run(["./sing-box", "generate", "reality-key"], 
-                                  cwd=INSTALL_DIR, capture_output=True, text=True).stdout.strip()
-        short_id = subprocess.run(["./sing-box", "generate", "rand", "--hex", "8"], 
-                                cwd=INSTALL_DIR, capture_output=True, text=True).stdout.strip()
 
         with st.spinner("正在检查并安装依赖 (sing-box, cloudflared)..."):
             arch = "amd64" if "x86_64" in platform.machine().lower() else "arm64"
             singbox_path = INSTALL_DIR / "sing-box"
+            
+            # 下载并安装 sing-box
             if not singbox_path.exists():
                 sb_version, sb_name_actual = "1.9.0-beta.11", f"sing-box-1.9.0-beta.11-linux-{arch}"
                 tar_path = INSTALL_DIR / "sing-box.tar.gz"
                 if not download_file(f"https://github.com/SagerNet/sing-box/releases/download/v{sb_version}/{sb_name_actual}.tar.gz", tar_path):
                     return False, "sing-box 下载失败。"
+                
                 import tarfile
                 with tarfile.open(tar_path, "r:gz") as tar: 
                     tar.extractall(path=INSTALL_DIR)
-                shutil.move(INSTALL_DIR / sb_name_actual / "sing-box", singbox_path)
-                shutil.rmtree(INSTALL_DIR / sb_name_actual)
-                tar_path.unlink()
+                
+                # 确保提取的目录存在
+                extracted_dir = INSTALL_DIR / sb_name_actual
+                if extracted_dir.exists():
+                    # 移动 sing-box 可执行文件
+                    extracted_singbox = extracted_dir / "sing-box"
+                    if extracted_singbox.exists():
+                        shutil.move(extracted_singbox, singbox_path)
+                    # 删除提取的目录
+                    shutil.rmtree(extracted_dir)
+                
+                # 删除压缩包
+                tar_path.unlink(missing_ok=True)
+                
+                # 设置执行权限
                 os.chmod(singbox_path, 0o755)
 
+            # 下载并安装 cloudflared
             cloudflared_path = INSTALL_DIR / "cloudflared"
             if not cloudflared_path.exists():
                 cf_arch = "amd64" if arch == "amd64" else "arm"
                 if not download_file(f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{cf_arch}", cloudflared_path):
                     return False, "cloudflared 下载失败。"
                 os.chmod(cloudflared_path, 0o755)
+
+        with st.spinner("正在生成Reality密钥..."):
+            # 生成Reality所需的密钥和shortId
+            private_key, public_key, short_id = generate_reality_keys(singbox_path)
 
         with st.spinner("正在根据您的配置启动VLESS Reality服务..."):
             # 生成VLESS Reality服务器配置
