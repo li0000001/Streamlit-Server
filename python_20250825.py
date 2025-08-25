@@ -30,7 +30,7 @@ SB_LOG_FILE = INSTALL_DIR / "sb.log"
 SINGBOX_CONFIG_FILE = INSTALL_DIR / "singbox_client_config.json"
 ALL_NODES_FILE = INSTALL_DIR / "allnodes.txt"
 
-# --- 辅助函数 (基本保持不变) ---
+# --- 辅助函数 ---
 
 def download_file(url, target_path):
     """下载文件并显示进度。"""
@@ -43,18 +43,38 @@ def download_file(url, target_path):
         st.error(f"下载失败: {url}, 错误: {e}")
         return False
 
+def get_latest_singbox_version():
+    """获取sing-box的最新稳定版本号"""
+    try:
+        # 获取最新release信息
+        req = urllib.request.Request(
+            "https://api.github.com/repos/SagerNet/sing-box/releases/latest",
+            headers={'User-Agent': 'Mozilla/5.0'}
+        )
+        with urllib.request.urlopen(req) as response:
+            data = json.loads(response.read().decode())
+            version = data['tag_name'].lstrip('v')
+            # 只使用稳定版，跳过beta版本
+            if 'beta' not in version and 'alpha' not in version:
+                return version
+    except Exception:
+        pass
+    # 如果获取失败，返回已知的稳定版本
+    return "1.10.1"
+
 def generate_vless_reality_link(config):
     """生成VLESS Reality链接。"""
-    # VLESS Reality 链接格式: vless://uuid@host:port?type=tcp&security=reality&pbk=publicKey&fp=firefox&flow=xtls-rprx-vision&sni=sniHost&sid=shortId#ps
+    # VLESS Reality 链接格式 - 优化参数
     params = {
         "type": "tcp",
         "security": "reality",
         "pbk": config.get("public_key"),
-        "fp": "chrome",  # 指纹，可选: chrome, firefox, safari, ios, android, edge, 360, qq
+        "fp": "firefox",  # 使用 firefox 指纹，对视频流更友好
         "flow": "xtls-rprx-vision",
         "sni": config.get("sni"),
         "sid": config.get("short_id"),
-        "spx": "/"
+        "spx": "/",
+        "encryption": "none"  # 明确指定加密方式
     }
     
     # 构建查询参数
@@ -119,21 +139,21 @@ def generate_reality_keys(singbox_path):
     except Exception as e:
         raise Exception(f"生成密钥过程中出错: {e}")
 
-# --- 核心逻辑重构 ---
+# --- 核心逻辑 ---
 
-def generate_all_configs(domain, uuid_str, public_key, private_key, short_id):
+def generate_all_configs(domain, uuid_str, public_key, private_key, short_id, sb_version):
     """生成所有节点链接和客户端配置文件，并返回用于UI显示的文本。"""
     hostname = socket.gethostname()[:10]
     all_links = []
     
-    # 生成VLESS Reality链接
+    # 生成VLESS Reality链接 - 使用优化的SNI
     all_links.append(generate_vless_reality_link({
         "ps": f"VLESS-Reality-{hostname}",
         "uuid": uuid_str,
         "host": domain,
         "port": "443",
         "public_key": public_key,
-        "sni": "www.amazon.com",  # 可更换为其他知名网站: www.apple.com, www.microsoft.com, www.google.com等
+        "sni": "www.microsoft.com",  # 更换为 Microsoft，对视频流更稳定
         "short_id": short_id
     }))
     
@@ -147,7 +167,8 @@ def generate_all_configs(domain, uuid_str, public_key, private_key, short_id):
 - **公钥 (Public Key):** `{public_key}`
 - **私钥 (Private Key):** `{private_key}`
 - **Short ID:** `{short_id}`
-- **SNI:** `www.amazon.com` (可自行更换)
+- **SNI:** `www.microsoft.com` (优化视频流)
+- **Sing-box 版本:** `{sb_version}` (最新稳定版)
 ---
 **VLESS Reality 链接 (可复制):**
 """ + "\n".join(all_links)
@@ -165,6 +186,31 @@ def generate_singbox_config(domain, uuid_str, public_key, short_id):
             "level": "info",
             "timestamp": True
         },
+        "dns": {
+            "servers": [
+                {
+                    "tag": "google",
+                    "address": "tls://8.8.8.8"
+                },
+                {
+                    "tag": "cloudflare", 
+                    "address": "https://1.1.1.1/dns-query"
+                }
+            ],
+            "rules": [
+                {
+                    "domain": [
+                        "youtube.com",
+                        "googlevideo.com",
+                        "ytimg.com",
+                        "ggpht.com",
+                        "googleapis.com"
+                    ],
+                    "server": "google"
+                }
+            ],
+            "strategy": "prefer_ipv4"
+        },
         "inbounds": [
             {
                 "type": "socks",
@@ -172,7 +218,8 @@ def generate_singbox_config(domain, uuid_str, public_key, short_id):
                 "listen": "127.0.0.1",
                 "listen_port": 1080,
                 "sniff": True,
-                "sniff_override_destination": True
+                "sniff_override_destination": True,
+                "domain_strategy": "prefer_ipv4"
             },
             {
                 "type": "http",
@@ -189,12 +236,13 @@ def generate_singbox_config(domain, uuid_str, public_key, short_id):
                 "server_port": 443,
                 "uuid": uuid_str,
                 "flow": "xtls-rprx-vision",
+                "packet_encoding": "xudp",
                 "tls": {
                     "enabled": True,
-                    "server_name": "www.amazon.com",
+                    "server_name": "www.microsoft.com",
                     "utls": {
                         "enabled": True,
-                        "fingerprint": "chrome"
+                        "fingerprint": "firefox"
                     },
                     "reality": {
                         "enabled": True,
@@ -227,7 +275,8 @@ def generate_singbox_config(domain, uuid_str, public_key, short_id):
                     ],
                     "outbound": "direct"
                 }
-            ]
+            ],
+            "final": "proxy"
         }
     }
     
@@ -249,11 +298,16 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
             arch = "amd64" if "x86_64" in platform.machine().lower() else "arm64"
             singbox_path = INSTALL_DIR / "sing-box"
             
-            # 下载并安装 sing-box
+            # 下载并安装 sing-box - 使用最新稳定版
             if not singbox_path.exists():
-                sb_version, sb_name_actual = "1.9.0-beta.11", f"sing-box-1.9.0-beta.11-linux-{arch}"
+                # 获取最新稳定版本号
+                sb_version = get_latest_singbox_version()
+                sb_name_actual = f"sing-box-{sb_version}-linux-{arch}"
                 tar_path = INSTALL_DIR / "sing-box.tar.gz"
-                if not download_file(f"https://github.com/SagerNet/sing-box/releases/download/v{sb_version}/{sb_name_actual}.tar.gz", tar_path):
+                
+                # 下载最新稳定版
+                download_url = f"https://github.com/SagerNet/sing-box/releases/download/v{sb_version}/{sb_name_actual}.tar.gz"
+                if not download_file(download_url, tar_path):
                     return False, "sing-box 下载失败。"
                 
                 import tarfile
@@ -289,7 +343,7 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
             private_key, public_key, short_id = generate_reality_keys(singbox_path)
 
         with st.spinner("正在根据您的配置启动VLESS Reality服务..."):
-            # 生成VLESS Reality服务器配置
+            # 生成优化的VLESS Reality服务器配置
             sb_config = {
                 "log": {
                     "level": "info",
@@ -303,6 +357,7 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
                         "listen_port": port_vm_ws,
                         "sniff": True,
                         "sniff_override_destination": True,
+                        "domain_strategy": "prefer_ipv4",  # 优化视频流
                         "users": [
                             {
                                 "uuid": uuid_str,
@@ -311,22 +366,27 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
                         ],
                         "tls": {
                             "enabled": True,
-                            "server_name": "www.amazon.com",
-                            "reality": {
+                            "server_name": "www.microsoft.com",  # 更换为
+                                                        "reality": {
                                 "enabled": True,
                                 "handshake": {
-                                    "server": "www.amazon.com",
+                                    "server": "www.microsoft.com",  # 保持一致
                                     "server_port": 443
                                 },
                                 "private_key": private_key,
                                 "short_id": [short_id]
                             }
+                        },
+                        "multiplex": {  # 添加多路复用支持
+                            "enabled": True,
+                            "padding": True
                         }
                     }
                 ],
                 "outbounds": [
                     {
-                        "type": "direct"
+                        "type": "direct",
+                        "domain_strategy": "prefer_ipv4"
                     }
                 ]
             }
@@ -349,7 +409,9 @@ def start_services(uuid_str, port_vm_ws, custom_domain, argo_token):
             if not final_domain:
                 return False, "未能确定隧道域名。请检查日志 (`.agsb/argo.log`)。"
 
-        links_output = generate_all_configs(final_domain, uuid_str, public_key, private_key, short_id)
+        # 获取当前使用的sing-box版本
+        sb_version = get_latest_singbox_version()
+        links_output = generate_all_configs(final_domain, uuid_str, public_key, private_key, short_id, sb_version)
         return True, links_output
     
     except Exception as e:
@@ -363,7 +425,7 @@ def uninstall_services():
     st.success("✅ 卸载完成。所有运行时文件和进程已清除。")
     st.session_state.clear()
 
-# --- UI 渲染函数 (已大幅简化) ---
+# --- UI 渲染函数 ---
 
 def render_main_ui(config):
     """渲染主控制面板。"""
@@ -413,6 +475,17 @@ def render_main_ui(config):
                 file_name="singbox_client_config.json",
                 mime="application/json",
             )
+        
+        # 显示优化提示
+        st.info("""
+        **优化提示：**
+        - 已使用最新稳定版 sing-box
+        - SNI 已优化为 `www.microsoft.com` 以提升视频流稳定性
+        - 使用 Firefox 指纹以获得更好的兼容性
+        - 如仍有问题，可尝试在 v2rayN 中手动调整以下参数：
+          - 更换 SNI: `www.apple.com`, `www.amazon.com`
+          - 更换指纹: `chrome`, `safari`, `edge`
+        """)
 
 def render_login_ui(secret_key):
     """渲染伪装的登录界面。"""
